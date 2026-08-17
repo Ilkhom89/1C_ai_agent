@@ -1,4 +1,7 @@
+import os
+from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -6,14 +9,13 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-import os
-from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Gemini Client yaratamiz
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
@@ -40,38 +42,33 @@ Qoidalar:
 - Xatolik sababini va aniq tuzatish yo'lini bosqichma-bosqich tushuntir.
 """
 
-async def send_long_message(update, text):
+async def send_long_message(update: Update, text: str):
+    """Telegram 4096 simvol cheklovidan o'tib, javobni bo'laklab yuborish"""
     max_length = 4000
-
     for i in range(0, len(text), max_length):
-        await update.message.reply_text(
-            text[i:i + max_length]
-        )
-
+        await update.message.reply_text(text[i:i + max_length])
 
 # MATNLI SAVOL
 async def text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     text = update.message.text
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=f"{SYSTEM_PROMPT}\n\nFoydalanuvchi savoli:\n{text}"
-    )
-
-    await send_long_message(update, response.text)
-
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"{SYSTEM_PROMPT}\n\nFoydalanuvchi savoli:\n{text}"
+        )
+        await send_long_message(update, response.text)
+    except Exception as e:
+        await update.message.reply_text(f"Xatolik yuz berdi: {str(e)}")
 
 # RASM
 async def photo_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = await file.download_as_bytearray()
 
-    photo = update.message.photo[-1]
-
-    file = await context.bot.get_file(photo.file_id)
-
-    image_bytes = await file.download_as_bytearray()
-
-    user_text = update.message.caption or """
+        user_text = update.message.caption or """
 Bu rasm 1C:Enterprise dasturidan olingan.
 Rasmni tahlil qil.
 Agar xatolik bo'lsa:
@@ -81,25 +78,26 @@ Agar xatolik bo'lsa:
 4. Kerak bo'lsa 1C kodini ber.
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[
-            {
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": bytes(image_bytes)
-                }
-            },
-            f"{SYSTEM_PROMPT}\n\n{user_text}"
-        ]
-    )
+        # google-genai SDK orqali rasmni to'g'ri shakllantirish
+        image_part = types.Part.from_bytes(
+            data=bytes(image_bytes),
+            mime_type="image/jpeg"
+        )
 
-    await send_long_message(update, response.text)
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                image_part,
+                f"{SYSTEM_PROMPT}\n\n{user_text}"
+            ]
+        )
 
+        await send_long_message(update, response.text)
+    except Exception as e:
+        await update.message.reply_text(f"Rasmni qayta ishlashda xatolik: {str(e)}")
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# Matn
 app.add_handler(
     MessageHandler(
         filters.TEXT & ~filters.COMMAND,
@@ -107,7 +105,6 @@ app.add_handler(
     )
 )
 
-# Rasm
 app.add_handler(
     MessageHandler(
         filters.PHOTO,
@@ -115,6 +112,6 @@ app.add_handler(
     )
 )
 
-print("1C AI Agent ishga tushdi...")
-
-app.run_polling()
+if name == "main":
+    print("1C AI Agent ishga tushdi...")
+    app.run_polling(drop_pending_updates=True)
